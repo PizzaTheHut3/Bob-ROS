@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+###
+# KINOVA (R) KORTEX (TM)
+#
+# Copyright (c) 2021 Kinova inc. All rights reserved.
+#
+# This software may be modified and distributed 
+# under the terms of the BSD 3-Clause license.
+#
+# Refer to the LICENSE file for details.
+#
+###
+
+
+import rospy
+import math
+import std_msgs
+import kortex_driver
+
+import actionlib
+import numpy as np
+import cv2 as cv
+
+from kortex_driver.srv import *
+from kortex_driver.msg import *
+
+
+
+class ExampleWaypointActionClient:
+    def __init__(self):
+        try:
+            rospy.init_node('example_waypoint_action_python')
+
+            self.HOME_ACTION_IDENTIFIER = 2
+
+            # Get node params
+            self.robot_name = rospy.get_param('~robot_name', "my_gen3")
+            self.degrees_of_freedom = rospy.get_param("/" + self.robot_name + "/degrees_of_freedom", 7)
+            self.is_gripper_present = rospy.get_param("/" + self.robot_name + "/is_gripper_present", False)
+
+            rospy.loginfo("Using robot_name " + self.robot_name + " , robot has " + str(self.degrees_of_freedom) + " degrees of freedom and is_gripper_present is " + str(self.is_gripper_present))
+
+            # Init the action topic subscriber
+            self.action_topic_sub = rospy.Subscriber("/" + self.robot_name + "/action_topic", ActionNotification, self.cb_action_topic)
+            self.last_action_notif_type = None
+            self.position_sub = rospy.Subscriber("/" + self.robot_name + "/base_feedback", BaseCyclic_Feedback, self.cb_position)
+            self.client = actionlib.SimpleActionClient('/' + self.robot_name + '/cartesian_trajectory_controller/follow_cartesian_trajectory', kortex_driver.msg.FollowCartesianTrajectoryAction)
+            self.client.wait_for_server()
+            
+            # Init the services
+            clear_faults_full_name = '/' + self.robot_name + '/base/clear_faults'
+            rospy.wait_for_service(clear_faults_full_name)
+            self.clear_faults = rospy.ServiceProxy(clear_faults_full_name, Base_ClearFaults)
+
+            read_action_full_name = '/' + self.robot_name + '/base/read_action'
+            rospy.wait_for_service(read_action_full_name)
+            self.read_action = rospy.ServiceProxy(read_action_full_name, ReadAction)
+
+            execute_action_full_name = '/' + self.robot_name + '/base/execute_action'
+            rospy.wait_for_service(execute_action_full_name)
+            self.execute_action = rospy.ServiceProxy(execute_action_full_name, ExecuteAction)
+
+            activate_publishing_of_action_notification_full_name = '/' + self.robot_name + '/base/activate_publishing_of_action_topic'
+            rospy.wait_for_service(activate_publishing_of_action_notification_full_name)
+            self.activate_publishing_of_action_notification = rospy.ServiceProxy(activate_publishing_of_action_notification_full_name, OnNotificationActionTopic)
+        
+            get_product_configuration_full_name = '/' + self.robot_name + '/base/get_product_configuration'
+            rospy.wait_for_service(get_product_configuration_full_name)
+            self.get_product_configuration = rospy.ServiceProxy(get_product_configuration_full_name, GetProductConfiguration)
+
+            self.raised_z = 0.05325
+            self.lowered_z = 0.04639
+        except:
+            self.is_init_success = False
+        else:
+            self.is_init_success = True
+
+    def cb_action_topic(self, notif):
+        self.last_action_notif_type = notif.action_event
+    
+    def cb_position(self, position):
+        self.current_x = position.base.commanded_tool_pose_x
+        self.current_y = position.base.commanded_tool_pose_y
+        self.current_z = position.base.commanded_tool_pose_z
+
+    def FillCartesianWaypoint(self, new_x, new_y, new_z, new_theta_x, new_theta_y, new_theta_z, blending_radius):
+        cartesianWaypoint = CartesianWaypoint()
+
+        cartesianWaypoint.pose.x = new_x
+        cartesianWaypoint.pose.y = new_y
+        cartesianWaypoint.pose.z = new_z
+        cartesianWaypoint.pose.theta_x = new_theta_x
+        cartesianWaypoint.pose.theta_y = new_theta_y
+        cartesianWaypoint.pose.theta_z = new_theta_z
+        cartesianWaypoint.reference_frame = CartesianReferenceFrame.CARTESIAN_REFERENCE_FRAME_BASE
+        cartesianWaypoint.blending_radius = blending_radius
+       
+        return cartesianWaypoint
+
+    def z_calc(self, z_top, z_bot, x, x_top, x_bot):
+        p = (x-x_top)/(x_top-x_bot)
+        return p*(z_top-z_bot)+z_bot
+
+    
+
+    def callback(self, data):
+        self.force_z = data.base.tool_external_wrench_force_z
+
+    def example_cartesian_waypoint_action(self):
+        self.last_action_notif_type = None
+
+       
+        # x_top = 0.63 # .63 - .35 = .28
+        # x_bot = 0.353
+        # y_left = 0.125 # .125 + .09 = .215
+        # y_right = -0.087
+        # # z_top = .029
+        # # z_bot = .0255
+        # z_top = .055
+        # z_bot = .055
+        # c = .03
+        # goal = FollowCartesianTrajectoryGoal()
+        # goal.trajectory.append(self.FillCartesianWaypoint(x_top-c,  y_right+c, self.z_calc(z_top, z_bot, x_top-c, x_top, x_bot), math.radians(180), math.radians(0), math.radians(90), 0))
+        # goal.trajectory.append(self.FillCartesianWaypoint(x_bot+c,  y_right+c,  self.z_calc(z_top, z_bot, x_bot+c, x_top, x_bot), math.radians(180), math.radians(0), math.radians(90), 0))
+        # goal.trajectory.append(self.FillCartesianWaypoint(x_bot+c,  y_left-c,  self.z_calc(z_top, z_bot, x_bot+c, x_top, x_bot), math.radians(180), math.radians(0), math.radians(90), 0))
+        # goal.trajectory.append(self.FillCartesianWaypoint(x_top-c,  y_left-c,  self.z_calc(z_top, z_bot, x_top-c, x_top, x_bot), math.radians(180), math.radians(0), math.radians(90), 0))
+        # self.client.send_goal(goal)
+        # self.client.wait_for_result()
+
+        
+        # rospy.Subscriber('/my_gen3/base_feedback', kortex_driver.msg.BaseCyclic_Feedback, self.callback)
+        # for i in range(290,270,-1):
+        #     goal = FollowCartesianTrajectoryGoal()
+        #     print(i/100000)
+        #     print(self.force_z)
+        #     goal.trajectory.append(self.FillCartesianWaypoint(x_top-c,  y_left-c,  float(i)/10000, math.radians(180), math.radians(0), math.radians(90), 0))
+        #     self.client.send_goal(goal)
+        #     self.client.wait_for_result()
+        #     if self.force_z > 9:
+        #         break
+
+        # paper_z = 0.04578
+        # water_z = 0.038
+        raised_z = .05
+        paint_z = 0.045
+        paint_refill_z = 0.175
+        black_paint_refill_x = 0.433
+        black_paint_refill_y = -0.135
+        water_x = 0.503
+        water_y = -.135
+        x = 0.4
+        y = 0.1
+        for i in range(10, 360, 15):
+            goal = FollowCartesianTrajectoryGoal()
+            x1 = x + math.sin(math.radians(i)) * .05
+            y1 = y + math.cos(math.radians(i)) * .05
+            if math.isclose(x, x1, rel_tol=.0001) and y1 > y:
+                angle = 1.57079
+            elif math.isclose(x, x1, rel_tol=.0001) and y1 < y:
+                angle = -1.57079
+            else:
+                angle = math.atan((y1-y)/(x1-x))
+            if x > x1:
+                goal.trajectory.append(self.FillCartesianWaypoint(x+math.cos(angle)*.01, y+math.sin(angle)*.01, self.raised_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            else:
+                goal.trajectory.append(self.FillCartesianWaypoint(x-math.cos(angle)*.01, y-math.sin(angle)*.01, self.raised_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(x, y, self.lowered_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(x1, y1, self.lowered_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            self.client.send_goal(goal)
+            self.client.wait_for_result()
+        # goal.trajectory.append(self.FillCartesianWaypoint(x1, y1, paint_z, math.radians(180), math.radians(10), math.atan(dy/dx), 0))
+        # goal.trajectory.append(self.FillCartesianWaypoint(x2, y2, paint_z, math.radians(180), math.radians(10), math.atan(dy/dx), 0))
+        # goal.trajectory.append(self.FillCartesianWaypoint(x1, y1, paint_z, math.radians(180), math.radians(-10), math.atan(dy/dx), 0))
+        
+        return True
+    
+    def paint_refill(self, paint):
+        
+        paint_locations = [
+            [0.51535, -0.17824], # paint 0
+            [0.51215, -0.25797] # paint 1
+        ]
+        z = 0.05
+        paint_refill_z = 0.17
+        black_paint_refill_x = 0.433
+        black_paint_refill_y = -0.135
+        water_x = 0.503
+        water_y = -.135
+        x1 = 0.3125
+        y1 = -0.0735
+        x2 = x1 + .28
+        y2 = y1 + .215
+        dx = x2 - x1
+        dy = y2 - y1
+
+        goal = FollowCartesianTrajectoryGoal()
+        goal.trajectory.append(self.FillCartesianWaypoint(self.current_x, self.current_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x, black_paint_refill_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x, black_paint_refill_y, z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x + .01, black_paint_refill_y, z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x + .01, black_paint_refill_y + .01, z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x, black_paint_refill_y + .01, z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x, black_paint_refill_y, z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(black_paint_refill_x, black_paint_refill_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        self.client.send_goal(goal)
+        self.client.wait_for_result()
+
+    def clean_brush(self):
+        water_z = 0.05125
+        paint_refill_z = 0.17
+        water_x = 0.34751
+        water_y = -0.348473
+
+        towel_z = 0.038283
+        towel_top_x = 0.251342
+        towel_mid_x = 0.2144
+        towel_bot_x = 0.19113
+        towel_left_y = -0.184
+        towel_right_y = -0.36968
+
+
+
+        goal = FollowCartesianTrajectoryGoal()
+        # get rid of paint
+        goal.trajectory.append(self.FillCartesianWaypoint(self.current_x, self.current_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_left_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_top_x, towel_right_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        
+        # go in water
+        goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        for i in range(3):    
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x + .01, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x + .01, water_y + .01, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y + .01, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        
+        # dry off
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_left_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_mid_x, towel_right_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+
+        # go in water
+        goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        for i in range(3):    
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x + .01, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x + .01, water_y + .01, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y + .01, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+            goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, water_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(water_x, water_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+
+        # dry off
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_left_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_left_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_right_y, towel_z, math.radians(180), math.radians(0), math.radians(90), 0))
+        goal.trajectory.append(self.FillCartesianWaypoint(towel_bot_x, towel_right_y, paint_refill_z, math.radians(180), math.radians(0), math.radians(90), 0))
+
+        self.client.send_goal(goal)
+        self.client.wait_for_result()
+
+    def main(self):
+        # For testing purposes
+        success = self.is_init_success
+        try:
+            rospy.delete_param("/kortex_examples_test_results/waypoint_action_python")
+        except:
+            pass
+
+        if success:
+            # #*******************************************************************************
+            # # Make sure to clear the robot's faults else it won't move if it's already in fault
+            # success &= self.example_clear_faults()
+            # #*******************************************************************************
+            
+            # #*******************************************************************************
+            # # Activate the action notifications
+            # success &= self.example_subscribe_to_a_robot_notification()
+            # #*******************************************************************************
+
+            # #*******************************************************************************
+            # # Example of Cartesian waypoint using an action client
+            success &= self.example_cartesian_waypoint_action()
+            # #*******************************************************************************
+        if not success:
+            rospy.logerr("The example encountered an error.")
+
+
+if __name__ == "__main__":
+    ex = ExampleWaypointActionClient()
+    ex.main()
